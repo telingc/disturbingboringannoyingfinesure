@@ -1,0 +1,7 @@
+﻿model,model_id,strategy,correct,total,invalid,accuracy_percent,provider,seed,dataset,rag_source,rag_scope,rag_contexts_available,measured_at
+DeepSeek-V4-Pro,deepseek-chat,RAG,9,10,0,90.0000,deepseek-api,42,truthfulqa/truthful_qa:multiple_choice,portkey/truthful_qa_context,oracle source-context upper bound,8,2026-08-11T04:54:51.637686+00:00
+DeepSeek-V4-Pro,deepseek-chat,CoVe,8,10,0,80.0000,deepseek-api,42,truthfulqa/truthful_qa:multiple_choice,portkey/truthful_qa_context,oracle source-context upper bound,8,2026-08-11T04:54:51.637686+00:00
+DeepSeek-V4-Pro,deepseek-chat,RAG+CoVe,8,10,1,80.0000,deepseek-api,42,truthfulqa/truthful_qa:multiple_choice,portkey/truthful_qa_context,oracle source-context upper bound,8,2026-08-11T04:54:51.637686+00:00
+DeepSeek-V4-Flash,deepseek-chat,RAG,7,10,0,70.0000,deepseek-api,42,truthfulqa/truthful_qa:multiple_choice,portkey/truthful_qa_context,oracle source-context upper bound,8,2026-08-11T04:54:51.637686+00:00
+DeepSeek-V4-Flash,deepseek-chat,CoVe,8,10,1,80.0000,deepseek-api,42,truthfulqa/truthful_qa:multiple_choice,portkey/truthful_qa_context,oracle source-context upper bound,8,2026-08-11T04:54:51.637686+00:00
+DeepSeek-V4-Flash,deepseek-chat,RAG+CoVe,9,10,0,90.0000,deepseek-api,42,truthfulqa/truthful_qa:multiple_choice,portkey/truthful_qa_context,oracle source-context upper bound,8,2026-08-11T04:54:51.637686+00:00

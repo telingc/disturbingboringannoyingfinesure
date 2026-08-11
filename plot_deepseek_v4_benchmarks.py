@@ -17,17 +17,17 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 from datasets import load_dataset
-from huggingface_hub import InferenceClient
+from openai import OpenAI  # 修改：引入 OpenAI SDK
 
 
 MODELS = (
     (
         "DeepSeek-V4-Pro",
-        os.getenv("DEEPSEEK_V4_PRO_MODEL", "deepseek-ai/DeepSeek-V4-Pro"),
+        os.getenv("DEEPSEEK_V4_PRO_MODEL", "deepseek-chat"),
     ),
     (
         "DeepSeek-V4-Flash",
-        os.getenv("DEEPSEEK_V4_FLASH_MODEL", "deepseek-ai/DeepSeek-V4-Flash"),
+        os.getenv("DEEPSEEK_V4_FLASH_MODEL", "deepseek-chat"),
     ),
 )
 METRICS = (
@@ -71,7 +71,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed-output-tokens", type=positive_int, default=96)
     parser.add_argument("--max-input-chars", type=positive_int, default=12000)
     parser.add_argument(
-        "--provider", default=os.getenv("HF_PROVIDER", "novita")
+        "--api-base",
+        default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        help="DeepSeek/OpenAI API base URL",
     )
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument(
@@ -88,64 +90,64 @@ def parse_args() -> argparse.Namespace:
 
 
 def get_api_key() -> str:
-    """Reads the Hugging Face API key from the environment.
+    """Reads the DeepSeek API key from the environment.
 
     Returns:
-        Hugging Face API key.
+        DeepSeek API key.
 
     Raises:
-        RuntimeError: If neither supported variable is set.
+        RuntimeError: No API keys found.
     """
-    api_key = os.getenv("apikey") or os.getenv("HF_TOKEN")
+    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("apikey")
     if not api_key:
-        raise RuntimeError("Set HF_TOKEN or apikey in the environment.")
+        raise RuntimeError("Set DEEPSEEK_API_KEY or OPENAI_API_KEY in the environment.")
     return api_key
 
 
 def build_client(
-    api_key: str, provider: str, timeout: float
-) -> InferenceClient:
-    """Builds a Hugging Face inference client.
+        api_key: str, api_base: str, timeout: float
+) -> OpenAI:
+    """Builds a simple deepseek client.
 
     Args:
-        api_key: Hugging Face API key.
-        provider: Inference provider name.
-        timeout: Request timeout in seconds.
+        api_key: key got from fore function.
+        provider: provider name.
+        timeout: request timeout in seconds.
 
     Returns:
-        Configured inference client.
+        a client.
     """
-    return InferenceClient(
+    return OpenAI(
         api_key=api_key,
-        provider=provider,
+        base_url=api_base,
         timeout=timeout,
     )
 
 
 def generate_text(
-    client: InferenceClient,
-    model_id: str,
-    prompt: str,
-    max_new_tokens: int,
+        client: OpenAI,
+        model_id: str,
+        prompt: str,
+        max_new_tokens: int,
 ) -> str:
     """Generates text with bounded retries.
 
     Args:
-        client: Hugging Face inference client.
-        model_id: Hugging Face model identifier.
-        prompt: Input prompt.
+        client: deepseek client.
+        model_id: model id.
+        prompt: prompt.
         max_new_tokens: Maximum generated token count.
 
     Returns:
         Generated text.
 
     Raises:
-        RuntimeError: If all requests fail.
+        RuntimeError: in case requests fail.
     """
     error: Exception | None = None
     for attempt in range(3):
         try:
-            result = client.chat_completion(
+            result = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model=model_id,
                 max_tokens=max_new_tokens,
@@ -156,17 +158,17 @@ def generate_text(
         except Exception as exc:
             error = exc
             if attempt < 2:
-                time.sleep(2**attempt)
+                time.sleep(2 ** attempt)
     raise RuntimeError(f"Inference failed for {model_id}: {error}") from error
 
 
 def load_benchmark_data(
-    api_key: str, samples: int, seed: int
+        hf_token: str | None, samples: int, seed: int
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Loads benchmark samples from Hugging Face.
 
     Args:
-        api_key: Hugging Face API key.
+        api_key: hugging face api key but sets to None.
         samples: Number of rows per benchmark.
         seed: Sampling seed.
 
@@ -177,12 +179,12 @@ def load_benchmark_data(
         "openai/gsm8k",
         "main",
         split="test",
-        token=api_key,
+        token=hf_token,
     )
     xsum = load_dataset(
         "EdinburghNLP/xsum",
         split="test",
-        token=api_key,
+        token=hf_token,
     )
     selected_gsm8k = gsm8k.shuffle(seed=seed).select(
         range(min(samples, len(gsm8k)))
@@ -221,9 +223,9 @@ def extract_number(text: str) -> Decimal | None:
 
 
 def evaluate_gsm8k(
-    client: InferenceClient,
-    model_id: str,
-    rows: list[dict[str, Any]],
+        client: OpenAI,
+        model_id: str,
+        rows: list[dict[str, Any]],
 ) -> float:
     """Computes GSM8K numeric exact-match accuracy.
 
@@ -305,10 +307,10 @@ def rouge_l_f1(candidate: str, reference: str) -> float:
 
 
 def evaluate_xsum(
-    client: InferenceClient,
-    model_id: str,
-    rows: list[dict[str, Any]],
-    max_input_chars: int,
+        client: OpenAI,
+        model_id: str,
+        rows: list[dict[str, Any]],
+        max_input_chars: int,
 ) -> float:
     """Computes mean XSum ROUGE-L F1.
 
@@ -344,16 +346,16 @@ def build_speed_prompt() -> str:
         "assumptions, and preserve enough evidence for independent review. "
     )
     return (
-        "Read the following material and produce a structured synthesis with "
-        "eight numbered findings.\n\n" + passage * 160
+            "Read the following material and produce a structured synthesis with "
+            "eight numbered findings.\n\n" + passage * 160
     )
 
 
 def measure_speed(
-    client: InferenceClient,
-    model_id: str,
-    trials: int,
-    output_tokens: int,
+        client: OpenAI,
+        model_id: str,
+        trials: int,
+        output_tokens: int,
 ) -> tuple[float, float]:
     """Measures client-estimated prefill and observed decode speeds.
 
@@ -371,20 +373,21 @@ def measure_speed(
     """
     prompt = build_speed_prompt()
     messages = [{"role": "user", "content": prompt}]
-    warmup = client.chat_completion(
+
+    warmup = client.chat.completions.create(
         messages=messages,
         model=model_id,
         max_tokens=1,
         temperature=0.0,
     )
-    input_tokens = warmup.usage.prompt_tokens
+    input_tokens = warmup.usage.prompt_tokens if warmup.usage else None
     if input_tokens is None or input_tokens <= 0:
         raise RuntimeError("The provider did not report prompt token usage.")
     prefill_speeds = []
     decode_speeds = []
     for _ in range(trials):
         started_at = time.perf_counter()
-        stream = client.chat_completion(
+        stream = client.chat.completions.create(
             messages=messages,
             model=model_id,
             max_tokens=output_tokens,
@@ -418,14 +421,14 @@ def measure_speed(
 
 
 def collect_results(
-    client: InferenceClient,
-    api_key: str,
-    provider: str,
-    samples: int,
-    seed: int,
-    speed_trials: int,
-    speed_output_tokens: int,
-    max_input_chars: int,
+        client: OpenAI,
+        hf_token: str | None,
+        provider: str,
+        samples: int,
+        seed: int,
+        speed_trials: int,
+        speed_output_tokens: int,
+        max_input_chars: int,
 ) -> list[dict[str, str]]:
     """Runs both models and collects chart-ready metrics.
 
@@ -442,7 +445,7 @@ def collect_results(
     Returns:
         Metric rows for CSV output.
     """
-    gsm8k_rows, xsum_rows = load_benchmark_data(api_key, samples, seed)
+    gsm8k_rows, xsum_rows = load_benchmark_data(hf_token, samples, seed)
     measured_at = datetime.now(timezone.utc).isoformat()
     results = []
     for model_name, model_id in MODELS:
@@ -572,7 +575,7 @@ def plot_csv(csv_path: Path, chart_path: Path) -> None:
         if metric in {"GSM8K EM", "XSum custom ROUGE-L"}:
             axis.set_ylim(0.0, 100.0)
     provider = rows[0]["provider"]
-    figure.suptitle(f"DeepSeek V4 comparison via Hugging Face ({provider})")
+    figure.suptitle(f"DeepSeek V4 comparison via DeepSeek API ({provider})")
     figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
     chart_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(chart_path, dpi=180, bbox_inches="tight")
@@ -587,11 +590,12 @@ def main() -> None:
     """
     args = parse_args()
     api_key = get_api_key()
-    client = build_client(api_key, args.provider, args.timeout)
+    hf_token = os.getenv("HF_TOKEN")
+    client = build_client(api_key, args.api_base, args.timeout)
     rows = collect_results(
         client,
-        api_key,
-        args.provider,
+        hf_token,
+        "deepseek-api",
         args.samples,
         args.seed,
         args.speed_trials,

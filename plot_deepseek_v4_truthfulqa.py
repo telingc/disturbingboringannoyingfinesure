@@ -18,17 +18,17 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 from datasets import load_dataset
-from huggingface_hub import InferenceClient
+from openai import OpenAI  # 修改：引入 OpenAI SDK
 
 
 MODELS = (
     (
         "DeepSeek-V4-Pro",
-        os.getenv("DEEPSEEK_V4_PRO_MODEL", "deepseek-ai/DeepSeek-V4-Pro"),
+        os.getenv("DEEPSEEK_V4_PRO_MODEL", "deepseek-chat"),
     ),
     (
         "DeepSeek-V4-Flash",
-        os.getenv("DEEPSEEK_V4_FLASH_MODEL", "deepseek-ai/DeepSeek-V4-Flash"),
+        os.getenv("DEEPSEEK_V4_FLASH_MODEL", "deepseek-chat"),
     ),
 )
 STRATEGIES = ("RAG", "CoVe", "RAG+CoVe")
@@ -66,7 +66,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=positive_int, default=3)
     parser.add_argument("--max-context-chars", type=positive_int, default=6000)
     parser.add_argument(
-        "--provider", default=os.getenv("HF_PROVIDER", "novita")
+        "--api-base",
+        default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        help="DeepSeek/OpenAI API base URL",
     )
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument(
@@ -83,42 +85,42 @@ def parse_args() -> argparse.Namespace:
 
 
 def get_api_key() -> str:
-    """Reads the Hugging Face API key from the environment.
+    """Reads the DeepSeek API key from the environment.
 
     Returns:
-        Hugging Face API key.
+        DeepSeek API key.
 
     Raises:
-        RuntimeError: If neither supported variable is set.
+        RuntimeError: No API keys found.
     """
-    api_key = os.getenv("apikey") or os.getenv("HF_TOKEN")
+    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("apikey")
     if not api_key:
-        raise RuntimeError("Set HF_TOKEN or apikey in the environment.")
+        raise RuntimeError("Set DEEPSEEK_API_KEY or OPENAI_API_KEY in the environment.")
     return api_key
 
 
 def build_client(
-    api_key: str, provider: str, timeout: float
-) -> InferenceClient:
-    """Builds a Hugging Face inference client.
+    api_key: str, api_base: str, timeout: float
+) -> OpenAI:
+    """Builds a simple deepseek client.
 
     Args:
-        api_key: Hugging Face API key.
-        provider: Inference provider name.
-        timeout: Request timeout in seconds.
+        api_key: key got from fore function.
+        provider: provider name.
+        timeout: request timeout in seconds.
 
     Returns:
-        Configured inference client.
+        a client.
     """
-    return InferenceClient(
+    return OpenAI(
         api_key=api_key,
-        provider=provider,
+        base_url=api_base,
         timeout=timeout,
     )
 
 
 def generate_text(
-    client: InferenceClient,
+    client: OpenAI,
     model_id: str,
     prompt: str,
     max_new_tokens: int,
@@ -126,21 +128,21 @@ def generate_text(
     """Generates text with bounded retries.
 
     Args:
-        client: Hugging Face inference client.
-        model_id: Hugging Face model identifier.
-        prompt: Input prompt.
+        client: deepseek client.
+        model_id: model id.
+        prompt: prompt.
         max_new_tokens: Maximum generated token count.
 
     Returns:
         Generated text.
 
     Raises:
-        RuntimeError: If all requests fail.
+        RuntimeError: in case requests fail.
     """
     error: Exception | None = None
     for attempt in range(3):
         try:
-            result = client.chat_completion(
+            result = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model=model_id,
                 max_tokens=max_new_tokens,
@@ -156,7 +158,7 @@ def generate_text(
 
 
 def load_evaluation_items(
-    api_key: str,
+    hf_token: str | None,
     samples: int,
     seed: int,
 ) -> list[dict[str, Any]]:
@@ -174,12 +176,12 @@ def load_evaluation_items(
         "truthfulqa/truthful_qa",
         "multiple_choice",
         split="validation",
-        token=api_key,
+        token=hf_token,
     )
     context_rows = load_dataset(
         "portkey/truthful_qa_context",
         split="train",
-        token=api_key,
+        token=hf_token,
     )
     contexts = {
         str(row["question"]): str(row["context"]) for row in context_rows
@@ -378,7 +380,7 @@ def parse_choice(text: str, option_count: int) -> int | None:
 
 
 def choose_answer(
-    client: InferenceClient,
+    client: OpenAI,
     model_id: str,
     question: str,
     choices: list[str],
@@ -410,7 +412,7 @@ def choose_answer(
 
 
 def create_verification_questions(
-    client: InferenceClient,
+    client: OpenAI,
     model_id: str,
     question: str,
     choices: list[str],
@@ -438,7 +440,7 @@ def create_verification_questions(
 
 
 def answer_verification_questions(
-    client: InferenceClient,
+    client: OpenAI,
     model_id: str,
     question: str,
     verification_questions: str,
@@ -469,7 +471,7 @@ def answer_verification_questions(
 
 
 def finalize_cove_answer(
-    client: InferenceClient,
+    client: OpenAI,
     model_id: str,
     question: str,
     choices: list[str],
@@ -506,7 +508,7 @@ def finalize_cove_answer(
 
 
 def run_cove(
-    client: InferenceClient,
+    client: OpenAI,
     model_id: str,
     question: str,
     choices: list[str],
@@ -551,7 +553,7 @@ def run_cove(
 
 
 def evaluate_strategy(
-    client: InferenceClient,
+    client: OpenAI,
     model_id: str,
     strategy: str,
     items: list[dict[str, Any]],
@@ -606,8 +608,8 @@ def evaluate_strategy(
 
 
 def collect_results(
-    client: InferenceClient,
-    api_key: str,
+    client: OpenAI,
+    hf_token: str | None,
     provider: str,
     samples: int,
     seed: int,
@@ -628,7 +630,7 @@ def collect_results(
     Returns:
         Accuracy rows for CSV output.
     """
-    items = load_evaluation_items(api_key, samples, seed)
+    items = load_evaluation_items(hf_token, samples, seed)
     measured_at = datetime.now(timezone.utc).isoformat()
     available_contexts = sum(
         has_usable_context(item["context"]) for item in items
@@ -752,11 +754,12 @@ def main() -> None:
     """
     args = parse_args()
     api_key = get_api_key()
-    client = build_client(api_key, args.provider, args.timeout)
+    hf_token = os.getenv("HF_TOKEN")
+    client = build_client(api_key, args.api_base, args.timeout)
     rows = collect_results(
         client,
-        api_key,
-        args.provider,
+        hf_token,
+        "deepseek-api",
         args.samples,
         args.seed,
         args.top_k,

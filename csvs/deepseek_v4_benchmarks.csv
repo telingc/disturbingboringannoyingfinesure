@@ -1,0 +1,9 @@
+﻿model,model_id,metric,value,unit,sample_size,provider,split,seed,protocol,measured_at
+DeepSeek-V4-Pro,deepseek-chat,GSM8K EM,90.0000,percent,10,deepseek-api,test,42,sampled zero-shot numeric EM,2026-08-11T03:50:13.361135+00:00
+DeepSeek-V4-Pro,deepseek-chat,XSum custom ROUGE-L,26.2013,percent,10,deepseek-api,test,42,sampled zero-shot; max 12000 source characters,2026-08-11T03:50:13.361135+00:00
+DeepSeek-V4-Pro,deepseek-chat,Prefill speed,1939.0631,estimated tokens/second,3,deepseek-api,fixed prompt,42,provider prompt tokens / client TTFT,2026-08-11T03:50:13.361135+00:00
+DeepSeek-V4-Pro,deepseek-chat,Decode speed,115.1714,observed tokens/second,3,deepseek-api,fixed prompt,42,stream token count / client decode time,2026-08-11T03:50:13.361135+00:00
+DeepSeek-V4-Flash,deepseek-chat,GSM8K EM,90.0000,percent,10,deepseek-api,test,42,sampled zero-shot numeric EM,2026-08-11T03:50:13.361135+00:00
+DeepSeek-V4-Flash,deepseek-chat,XSum custom ROUGE-L,24.0445,percent,10,deepseek-api,test,42,sampled zero-shot; max 12000 source characters,2026-08-11T03:50:13.361135+00:00
+DeepSeek-V4-Flash,deepseek-chat,Prefill speed,2230.9016,estimated tokens/second,3,deepseek-api,fixed prompt,42,provider prompt tokens / client TTFT,2026-08-11T03:50:13.361135+00:00
+DeepSeek-V4-Flash,deepseek-chat,Decode speed,96.3378,observed tokens/second,3,deepseek-api,fixed prompt,42,stream token count / client decode time,2026-08-11T03:50:13.361135+00:00
