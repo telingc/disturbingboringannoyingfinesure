@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=positive_int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--repeats", type=positive_int, default=3)
     parser.add_argument("--speed-trials", type=positive_int, default=3)
     parser.add_argument("--speed-output-tokens", type=positive_int, default=96)
     parser.add_argument("--max-input-chars", type=positive_int, default=12000)
@@ -110,12 +111,12 @@ def build_client(
     """Builds a simple deepseek client.
 
     Args:
-        api_key: key got from fore function.
-        provider: provider name.
-        timeout: request timeout in seconds.
+        api_key: DeepSeek API key.
+        api_base: API base URL.
+        timeout: Request timeout in seconds.
 
     Returns:
-        a client.
+        An OpenAI-compatible client.
     """
     return OpenAI(
         api_key=api_key,
@@ -356,7 +357,7 @@ def measure_speed(
         model_id: str,
         trials: int,
         output_tokens: int,
-) -> tuple[float, float]:
+) -> tuple[float, float, float, float]:
     """Measures client-estimated prefill and observed decode speeds.
 
     Args:
@@ -366,7 +367,7 @@ def measure_speed(
         output_tokens: Maximum output tokens per trial.
 
     Returns:
-        Median prefill and decode tokens per second.
+        Median and standard deviation of prefill and decode tokens per second.
 
     Raises:
         RuntimeError: If the provider does not stream usable output.
@@ -417,7 +418,12 @@ def measure_speed(
             decode_speeds.append((generated_tokens - 1) / decode_seconds)
         else:
             decode_speeds.append(0.0)
-    return statistics.median(prefill_speeds), statistics.median(decode_speeds)
+    return (
+        statistics.median(prefill_speeds),
+        statistics.stdev(prefill_speeds) if trials > 1 else 0.0,
+        statistics.median(decode_speeds),
+        statistics.stdev(decode_speeds) if trials > 1 else 0.0,
+    )
 
 
 def collect_results(
@@ -426,89 +432,145 @@ def collect_results(
         provider: str,
         samples: int,
         seed: int,
+        repeats: int,
         speed_trials: int,
         speed_output_tokens: int,
         max_input_chars: int,
 ) -> list[dict[str, str]]:
-    """Runs both models and collects chart-ready metrics.
+    """Runs both models over repeat seeds and collects chart-ready metrics.
 
     Args:
         client: Hugging Face inference client.
-        api_key: Hugging Face API key.
         provider: Inference provider name.
         samples: Number of quality examples per dataset.
-        seed: Sampling seed.
+        seed: Base sampling seed.
+        repeats: Number of independent seed runs.
         speed_trials: Number of timed speed trials.
         speed_output_tokens: Maximum generated tokens per speed trial.
         max_input_chars: Maximum XSum source length.
 
     Returns:
-        Metric rows for CSV output.
+        Per-repeat and summary metric rows for CSV output.
     """
-    gsm8k_rows, xsum_rows = load_benchmark_data(hf_token, samples, seed)
     measured_at = datetime.now(timezone.utc).isoformat()
     results = []
+    quality_metrics = (
+        (
+            "GSM8K EM",
+            "percent",
+            "test",
+            "sampled zero-shot numeric EM",
+        ),
+        (
+            "XSum custom ROUGE-L",
+            "percent",
+            "test",
+            f"sampled zero-shot; max {max_input_chars} source characters",
+        ),
+    )
     for model_name, model_id in MODELS:
         print(f"Evaluating {model_name}...")
-        gsm8k_score = evaluate_gsm8k(client, model_id, gsm8k_rows)
-        xsum_score = evaluate_xsum(
-            client,
-            model_id,
-            xsum_rows,
-            max_input_chars,
-        )
-        prefill_speed, decode_speed = measure_speed(
+        prefill_speed, prefill_std, decode_speed, decode_std = measure_speed(
             client,
             model_id,
             speed_trials,
             speed_output_tokens,
         )
-        values = (
-            (
-                "GSM8K EM",
-                gsm8k_score,
-                "percent",
-                samples,
-                "test",
-                "sampled zero-shot numeric EM",
-            ),
-            (
-                "XSum custom ROUGE-L",
-                xsum_score,
-                "percent",
-                samples,
-                "test",
-                f"sampled zero-shot; max {max_input_chars} source characters",
-            ),
+        repeat_seeds = [seed + index * 1000 for index in range(repeats)]
+        per_seed_scores = {
+            "GSM8K EM": [],
+            "XSum custom ROUGE-L": [],
+        }
+        for repeat_seed in repeat_seeds:
+            gsm8k_rows, xsum_rows = load_benchmark_data(
+                hf_token, samples, repeat_seed
+            )
+            per_seed_scores["GSM8K EM"].append(
+                evaluate_gsm8k(client, model_id, gsm8k_rows)
+            )
+            per_seed_scores["XSum custom ROUGE-L"].append(
+                evaluate_xsum(
+                    client,
+                    model_id,
+                    xsum_rows,
+                    max_input_chars,
+                )
+            )
+            for metric, unit, split, protocol in quality_metrics:
+                results.append(
+                    {
+                        "model": model_name,
+                        "model_id": model_id,
+                        "metric": metric,
+                        "value": f"{per_seed_scores[metric][-1]:.4f}",
+                        "unit": unit,
+                        "sample_size": str(samples),
+                        "provider": provider,
+                        "split": split,
+                        "seed": str(repeat_seed),
+                        "repeat_seed": str(repeat_seed),
+                        "protocol": protocol,
+                        "measured_at": measured_at,
+                    }
+                )
+        for metric, unit, split, protocol in quality_metrics:
+            mean_value = statistics.fmean(per_seed_scores[metric])
+            std_value = (
+                statistics.stdev(per_seed_scores[metric])
+                if repeats > 1
+                else 0.0
+            )
+            results.append(
+                {
+                    "model": model_name,
+                    "model_id": model_id,
+                    "metric": metric,
+                    "value": f"{mean_value:.4f}",
+                    "std_value": f"{std_value:.4f}",
+                    "unit": unit,
+                    "sample_size": str(samples * repeats),
+                    "repeats": str(repeats),
+                    "provider": provider,
+                    "split": split,
+                    "seed": str(seed),
+                    "repeat_seed": "summary",
+                    "protocol": protocol,
+                    "measured_at": measured_at,
+                }
+            )
+        speed_metrics = (
             (
                 "Prefill speed",
                 prefill_speed,
+                prefill_std,
                 "estimated tokens/second",
-                speed_trials,
                 "fixed prompt",
                 "provider prompt tokens / client TTFT",
             ),
             (
                 "Decode speed",
                 decode_speed,
+                decode_std,
                 "observed tokens/second",
-                speed_trials,
                 "fixed prompt",
                 "stream token count / client decode time",
             ),
         )
-        for metric, value, unit, sample_size, split, protocol in values:
+        for metric, value, std_value, unit, split, protocol in speed_metrics:
             results.append(
                 {
                     "model": model_name,
                     "model_id": model_id,
                     "metric": metric,
                     "value": f"{value:.4f}",
+                    "std_value": f"{std_value:.4f}",
                     "unit": unit,
-                    "sample_size": str(sample_size),
+                    "sample_size": str(speed_trials),
+                    "repeats": str(repeats),
                     "provider": provider,
                     "split": split,
                     "seed": str(seed),
+                    "repeat_seed": "summary",
                     "protocol": protocol,
                     "measured_at": measured_at,
                 }
@@ -527,8 +589,11 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         None.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(
+        dict.fromkeys(field for row in rows for field in row)
+    )
     with path.open("w", encoding="utf-8-sig", newline="") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -547,7 +612,7 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 
 def plot_csv(csv_path: Path, chart_path: Path) -> None:
-    """Plots benchmark bars from a generated CSV file.
+    """Plots benchmark bars with repeat-seed or trial error bars.
 
     Args:
         csv_path: CSV input path.
@@ -558,24 +623,66 @@ def plot_csv(csv_path: Path, chart_path: Path) -> None:
     """
     rows = read_csv(csv_path)
     model_names = [model_name for model_name, _ in MODELS]
+    summary_rows = [row for row in rows if row["repeat_seed"] == "summary"]
     values = {
-        (row["metric"], row["model"]): float(row["value"]) for row in rows
+        (row["metric"], row["model"]): float(row["value"])
+        for row in summary_rows
+    }
+    std_values = {
+        (row["metric"], row["model"]): float(row["std_value"])
+        for row in summary_rows
     }
     figure, axes = plt.subplots(2, 2, figsize=(12, 8))
     for axis, (metric, ylabel) in zip(axes.flat, METRICS, strict=True):
         heights = [values[(metric, model)] for model in model_names]
-        bars = axis.bar(model_names, heights, color=COLORS, width=0.62)
-        metric_row = next(row for row in rows if row["metric"] == metric)
+        deviations = [
+            std_values[(metric, model)] for model in model_names
+        ]
+        bars = axis.bar(
+            model_names,
+            heights,
+            color=COLORS,
+            width=0.62,
+            yerr=deviations,
+            capsize=4,
+        )
+        label_positions = [
+            height + deviation + 2.0
+            for height, deviation in zip(heights, deviations)
+        ]
+        for position, label_y, height in zip(
+            range(len(heights)), label_positions, heights
+        ):
+            axis.text(
+                position,
+                label_y,
+                f"{height:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+        metric_row = next(
+            row for row in summary_rows if row["metric"] == metric
+        )
         sample_size = metric_row["sample_size"]
         size_label = "trials" if "speed" in metric else "n"
         axis.set_title(f"{metric} ({size_label}={sample_size})")
         axis.set_ylabel(ylabel)
         axis.grid(axis="y", alpha=0.25)
-        axis.bar_label(bars, fmt="%.2f", padding=3)
         if metric in {"GSM8K EM", "XSum custom ROUGE-L"}:
             axis.set_ylim(0.0, 100.0)
-    provider = rows[0]["provider"]
-    figure.suptitle(f"DeepSeek V4 comparison via DeepSeek API ({provider})")
+        else:
+            label_tops = [
+                height + deviation + 2.0 + 1.5
+                for height, deviation in zip(heights, deviations)
+            ]
+            axis.set_ylim(0.0, max(label_tops))
+    repeat_count = int(summary_rows[0]["repeats"])
+    provider = summary_rows[0]["provider"]
+    figure.suptitle(
+        "DeepSeek V4 comparison via DeepSeek API "
+        f"({provider}, {repeat_count} seeds, mean +/- std)"
+    )
     figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
     chart_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(chart_path, dpi=180, bbox_inches="tight")
@@ -598,6 +705,7 @@ def main() -> None:
         "deepseek-api",
         args.samples,
         args.seed,
+        args.repeats,
         args.speed_trials,
         args.speed_output_tokens,
         args.max_input_chars,

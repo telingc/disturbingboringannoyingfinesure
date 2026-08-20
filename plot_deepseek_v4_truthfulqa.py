@@ -6,6 +6,7 @@ import math
 import os
 import random
 import re
+import statistics
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -31,7 +32,7 @@ MODELS = (
         os.getenv("DEEPSEEK_V4_FLASH_MODEL", "deepseek-chat"),
     ),
 )
-STRATEGIES = ("RAG", "CoVe", "RAG+CoVe")
+STRATEGIES = ("Baseline", "RAG", "CoVe", "RAG+CoVe")
 COLORS = ("#1A73E8", "#34A853")
 
 
@@ -63,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=positive_int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--repeats", type=positive_int, default=3)
     parser.add_argument("--top-k", type=positive_int, default=3)
     parser.add_argument("--max-context-chars", type=positive_int, default=6000)
     parser.add_argument(
@@ -105,12 +107,12 @@ def build_client(
     """Builds a simple deepseek client.
 
     Args:
-        api_key: key got from fore function.
-        provider: provider name.
-        timeout: request timeout in seconds.
+        api_key: DeepSeek API key.
+        api_base: API base URL.
+        timeout: Request timeout in seconds.
 
     Returns:
-        a client.
+        An OpenAI-compatible client.
     """
     return OpenAI(
         api_key=api_key,
@@ -584,7 +586,7 @@ def evaluate_strategy(
                 top_k,
                 max_context_chars,
             )
-        if strategy == "RAG":
+        if strategy in {"RAG", "Baseline"}:
             prediction, _ = choose_answer(
                 client,
                 model_id,
@@ -613,51 +615,87 @@ def collect_results(
     provider: str,
     samples: int,
     seed: int,
+    repeats: int,
     top_k: int,
     max_context_chars: int,
 ) -> list[dict[str, str]]:
-    """Runs all TruthfulQA model and strategy combinations.
+    """Runs all TruthfulQA model and strategy combinations over repeat seeds.
 
     Args:
         client: Hugging Face inference client.
-        api_key: Hugging Face API key.
         provider: Inference provider name.
         samples: Number of evaluation questions.
-        seed: Sampling seed.
+        seed: Base sampling seed.
+        repeats: Number of independent seed runs.
         top_k: Retrieved chunks per question.
         max_context_chars: Maximum retrieved context length.
 
     Returns:
-        Accuracy rows for CSV output.
+        Per-repeat and summary accuracy rows for CSV output.
     """
-    items = load_evaluation_items(hf_token, samples, seed)
-    measured_at = datetime.now(timezone.utc).isoformat()
-    available_contexts = sum(
-        has_usable_context(item["context"]) for item in items
-    )
+    repeat_seeds = [seed + index * 1000 for index in range(repeats)]
     rows = []
     for model_name, model_id in MODELS:
         for strategy in STRATEGIES:
-            print(f"Evaluating {model_name} with {strategy}...")
-            correct, invalid = evaluate_strategy(
-                client,
-                model_id,
-                strategy,
-                items,
-                top_k,
-                max_context_chars,
+            accuracies = []
+            for repeat_seed in repeat_seeds:
+                print(
+                    f"Evaluating {model_name} with {strategy} "
+                    f"(seed={repeat_seed})..."
+                )
+                items = load_evaluation_items(
+                    hf_token, samples, repeat_seed
+                )
+                measured_at = datetime.now(timezone.utc).isoformat()
+                available_contexts = sum(
+                    has_usable_context(item["context"]) for item in items
+                )
+                correct, invalid = evaluate_strategy(
+                    client,
+                    model_id,
+                    strategy,
+                    items,
+                    top_k,
+                    max_context_chars,
+                )
+                accuracy = 100.0 * correct / len(items)
+                accuracies.append(accuracy)
+                rows.append(
+                    {
+                        "model": model_name,
+                        "model_id": model_id,
+                        "strategy": strategy,
+                        "correct": str(correct),
+                        "total": str(len(items)),
+                        "invalid": str(invalid),
+                        "accuracy_percent": f"{accuracy:.4f}",
+                        "provider": provider,
+                        "seed": str(repeat_seed),
+                        "repeat_seed": str(repeat_seed),
+                        "dataset": "truthfulqa/truthful_qa:multiple_choice",
+                        "rag_source": "portkey/truthful_qa_context",
+                        "rag_scope": "oracle source-context upper bound",
+                        "rag_contexts_available": str(available_contexts),
+                        "measured_at": measured_at,
+                    }
+                )
+            mean_accuracy = statistics.fmean(accuracies)
+            std_accuracy = (
+                statistics.stdev(accuracies) if repeats > 1 else 0.0
             )
             rows.append(
                 {
                     "model": model_name,
                     "model_id": model_id,
                     "strategy": strategy,
-                    "correct": str(correct),
-                    "total": str(len(items)),
-                    "invalid": str(invalid),
-                    "accuracy_percent": f"{100.0 * correct / len(items):.4f}",
+                    "correct": "",
+                    "total": str(samples * repeats),
+                    "invalid": "",
+                    "accuracy_percent": f"{mean_accuracy:.4f}",
+                    "accuracy_std_percent": f"{std_accuracy:.4f}",
                     "provider": provider,
                     "seed": str(seed),
+                    "repeat_seed": "summary",
                     "dataset": "truthfulqa/truthful_qa:multiple_choice",
                     "rag_source": "portkey/truthful_qa_context",
                     "rag_scope": "oracle source-context upper bound",
@@ -679,8 +717,11 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         None.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(
+        dict.fromkeys(field for row in rows for field in row)
+    )
     with path.open("w", encoding="utf-8-sig", newline="") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -699,7 +740,7 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 
 def plot_csv(csv_path: Path, chart_path: Path) -> None:
-    """Plots grouped accuracy bars from a generated CSV file.
+    """Plots grouped accuracy bars with repeat-seed error bars.
 
     Args:
         csv_path: CSV input path.
@@ -710,34 +751,69 @@ def plot_csv(csv_path: Path, chart_path: Path) -> None:
     """
     rows = read_csv(csv_path)
     model_names = [model_name for model_name, _ in MODELS]
+    summary_rows = [row for row in rows if row["repeat_seed"] == "summary"]
     values = {
         (row["strategy"], row["model"]): float(row["accuracy_percent"])
-        for row in rows
+        for row in summary_rows
+    }
+    std_values = {
+        (row["strategy"], row["model"]): float(
+            row["accuracy_std_percent"]
+        )
+        for row in summary_rows
     }
     x_positions = list(range(len(STRATEGIES)))
     width = 0.36
     figure, axis = plt.subplots(figsize=(10, 6))
+    label_tops = []
     for model_index, model_name in enumerate(model_names):
         offset = (model_index - 0.5) * width
         positions = [position + offset for position in x_positions]
         heights = [values[(strategy, model_name)] for strategy in STRATEGIES]
+        deviations = [
+            std_values[(strategy, model_name)] for strategy in STRATEGIES
+        ]
         bars = axis.bar(
             positions,
             heights,
             width,
             label=model_name,
             color=COLORS[model_index],
+            yerr=deviations,
+            capsize=4,
         )
-        axis.bar_label(bars, fmt="%.2f", padding=3)
-    sample_size = rows[0]["total"]
+        label_positions = [
+            height + deviation + 2.0
+            for height, deviation in zip(heights, deviations)
+        ]
+        for position, label_y, height in zip(
+            positions, label_positions, heights
+        ):
+            axis.text(
+                position,
+                label_y,
+                f"{height:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+        label_tops.extend(
+            height + deviation + 2.0 + 1.5
+            for height, deviation in zip(heights, deviations)
+        )
+    sample_size = summary_rows[0]["total"]
+    repeat_count = sum(
+        row["repeat_seed"] != "summary" for row in rows
+    ) // (len(MODELS) * len(STRATEGIES))
     title = (
-        "TruthfulQA prompted accuracy; oracle source-context RAG "
-        f"(n={sample_size})"
+        "TruthfulQA prompted accuracy; baseline vs RAG/CoVe "
+        f"combinations (n={sample_size}, {repeat_count} seeds, "
+        "mean +/- std)"
     )
     axis.set_title(title)
     axis.set_ylabel("Accuracy (%)")
     axis.set_xticks(x_positions, STRATEGIES)
-    axis.set_ylim(0.0, 100.0)
+    axis.set_ylim(0.0, min(100.0, max(label_tops)))
     axis.grid(axis="y", alpha=0.25)
     axis.legend()
     figure.tight_layout()
@@ -762,6 +838,7 @@ def main() -> None:
         "deepseek-api",
         args.samples,
         args.seed,
+        args.repeats,
         args.top_k,
         args.max_context_chars,
     )
